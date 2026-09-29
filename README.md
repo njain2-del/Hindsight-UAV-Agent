@@ -1,88 +1,153 @@
 # Aerospace Maintenance Intelligence Agent
 
-An assistant that remembers the maintenance history of each aircraft and component, and uses it when a new fault is reported. Built on [Hindsight](https://github.com/vectorize-io/hindsight) for agent memory.
+An assistant that answers UAV fault reports using the maintenance history of
+the fleet, remembered and recalled via [Hindsight](https://github.com/vectorize-io/hindsight)
+agent memory.
 
-**Without memory:** "Inspect the motor and bearings."
+Without memory: "UAV-264 has high-RPM motor vibration and it's on a batch
+M-B7 motor. What should we check?" gets a generic checklist.
 
-**With memory:** "UAV-204 previously had high-RPM vibration and a bearing replacement. Check bearing condition, shaft alignment and high-RPM vibration before replacing the motor."
+With memory: the agent recalls that batch M-B7 motors have a recurring
+bearing-wear pattern in the 44–52 flight-hour range across several aircraft,
+and that motor replacement alone hasn't fixed similar cases before — and
+leads with that, citing the specific prior reports it's drawing from.
 
 ## The problem
 
-Maintenance teams produce inspection reports, fault write-ups, component swaps and technician notes. The most useful details live in free text ("vibration worse at high RPM"), which structured databases never capture. When the same fault returns months later, that history is hard to find.
+Maintenance teams produce a steady stream of inspection reports, fault
+notes, component swaps, and technician observations. The useful signal is
+usually buried: the last time this exact airframe, or this exact component
+batch, had this problem, and what actually fixed it. When that history
+lives across scattered logs, it's hard to retrieve at the moment it matters.
+
+**All data in this repository is synthetic**, written by hand to plant
+realistic, checkable patterns rather than pulled from real fleet records.
 
 ## How it works
 
-![Architecture](architecture.png)
+```
+Technician report ──▶ retain() ──▶ Hindsight memory bank
+                                          │
+Technician question ──▶ recall() ────────┤
+                                          ▼
+                                     reflect()
+                                          │
+                                          ▼
+                               Answer + cited evidence
+```
 
-The agent is a single Python module that talks to a Hindsight server:
+The agent talks to a Hindsight memory bank through three operations:
 
 | Command | What it does | Hindsight call |
 |---|---|---|
-| `log` | Stores a new maintenance report with its event timestamp | `retain()` |
-| `ask` | Answers a fault question using the fleet's history | `reflect()` |
-| `demo` | Loads sample history, then compares answers with and without memory | all three, plus `recall()` for evidence |
+| `log` | Stores a new maintenance report, event-timestamped | `retain()` |
+| `ask` | Answers a fault question, citing prior evidence | `reflect()` |
+| `demo` | Runs a small built-in scenario, with and without memory | `retain()`, `reflect()` |
 
-Design decisions:
+The recalled evidence — the actual retained report text — is always
+available separately from the final answer, via `recall()`. This is what
+makes every citation checkable: the answer and the evidence behind it are
+never the same call.
 
-- **One bank for the whole fleet.** Aircraft identity ("UAV-204") is in the report text and retrieval does the scoping. This keeps fleet-wide questions possible ("has any unit had this ESC fault?").
-- **A control bank.** `uav-fleet-no-memory` has the same mission and no history, so you can see what memory actually changes.
-- **"No relevant history" is a valid answer.** The mission tells the agent to say so and fall back to general guidance, not invent a past.
-- **Real event timestamps.** Reports are stored with the date they happened, not the ingest time.
-- **Evidence is shown.** The demo prints raw `recall()` results so a technician can see the reports behind an answer.
+### Design decisions
+
+- **One bank per fleet.** Aircraft identity (`UAV-###`) is in the report
+  text and the retained context, not a separate index. Hindsight's keyword
+  and entity-aware search keeps identifiers from blurring across aircraft
+  with similar symptoms.
+- **A mission, not just a prompt.** The bank is created with a fixed
+  mission string that defines the agent's role and its "advisory only"
+  boundary — this travels with the bank, not just a single call.
+- **Real event dates.** Reports are retained with the date the event
+  actually happened, not the date they were loaded, so ordering and
+  hour/cycle patterns stay meaningful.
+- **"No relevant history" is a valid answer.** The agent is instructed to
+  say so rather than generalize as if it had evidence it doesn't.
+- **Evidence ships with every answer.** In the CLI this means running
+  `recall()` alongside `reflect()`; in the web UI this is a dedicated panel
+  next to the chat, so a technician can verify a claim without digging
+  through logs.
+
+## The dataset
+
+`load_dataset.py` seeds a fresh bank (`uav-fleet-v2`) with 29 hand-written
+inspection and routine-check reports across 8 aircraft, with five patterns
+planted on purpose:
+
+- **Loose motor mount screws** causing intermittent vibration at low-to-mid
+  throttle — replacing the motor alone doesn't fix it.
+- **Bearing wear at ~44–52 flight hours** on motors from batch **M-B7**.
+- **ESC overheating** in hot weather (ambient 39–42°C) — duct cleaning
+  alone sometimes doesn't hold.
+- **Compass drift** from power cables routed near the compass module.
+- **Battery cell imbalance** after ~140–160 charge cycles.
+
+The dataset is small enough to audit by hand: every claim the agent makes
+can be checked against the 29 source reports directly.
 
 ## Quick start
 
-Requirements: a recent Python 3 and an OpenAI API key (or another provider Hindsight supports).
+Requirements: Python 3.10+, a Hindsight API key, and an LLM provider key
+(this project uses Groq by default).
 
-**1. Install**
-
-```bash
-python -m pip install hindsight-all hindsight-client
+**1. Install dependencies**
+```
+pip install -r requirements.txt
 ```
 
-**2. Start the Hindsight server** (leave this terminal open)
-
-Windows PowerShell:
-
-```powershell
-$env:HINDSIGHT_API_LLM_PROVIDER="openai"
-$env:HINDSIGHT_API_LLM_API_KEY="your-key"
-hindsight-api
+**2. Set environment variables** (in a `.env` file, never committed)
+```
+HINDSIGHT_API_KEY=your-key-here
+GROQ_API_KEY=your-key-here
 ```
 
-macOS / Linux:
+**3. Seed the memory bank** (run once)
+```
+python load_dataset.py
+```
+This stores all 29 reports into the `uav-fleet-v2` bank. Each report goes
+through LLM extraction on Hindsight's side, so this takes a few minutes.
+A `loaded_dataset.flag` file prevents accidental re-seeding — delete it
+only if you intentionally want to reload from scratch (use a new bank name
+to avoid duplicating data).
 
-```bash
-export HINDSIGHT_API_LLM_PROVIDER=openai
-export HINDSIGHT_API_LLM_API_KEY=your-key
-hindsight-api
+**4. Ask questions from the CLI**
+```
+python uav_agent_code.py ask "UAV-264 has motor vibration at 49 flight hours on batch M-B7. What should we check?"
+python uav_agent_code.py log "UAV-264 - bearing replaced on motor 2 after grinding noise at 50 flight hours. Motor from batch M-B7. Resolved."
+python uav_agent_code.py demo
 ```
 
-The server listens on `http://localhost:8888`. If `hindsight-api` isn't found on Windows, call it by its full path inside your Python `Scripts` folder.
-
-**3. Run the agent** (in a second terminal)
-
-```bash
-python maintenance_agent.py demo
-python maintenance_agent.py log "UAV-204 - motor vibration returned at 120 flight hours. Bearing rechecked."
-python maintenance_agent.py ask "UAV-204 has high motor vibration again. What should we check?"
+**5. Or run the web UI**
 ```
+streamlit run streamlit_app.py
+```
+Two tabs: **Ask**, with the agent's guidance next to a "memory used" panel
+showing the exact reports it recalled; and **Log new report**, which stores
+a new report immediately, available to the very next question — the
+learning loop, end to end.
 
 ## Configuration
 
 | Setting | Where | Notes |
 |---|---|---|
-| Server URL | `Hindsight(base_url=...)` in `maintenance_agent.py` | Defaults to `http://localhost:8888` |
-| LLM provider and key | Environment variables | Never commit keys to the repo |
-| Mission | `MISSION` in `maintenance_agent.py` | Defines the agent's role and its "advisory only" behavior |
-| Sample history | `HISTORY` in `maintenance_agent.py` | Includes a deliberate trap: UAV-117 also had vibration, but from loose mount screws |
+| Hindsight server URL | `BASE_URL` in `uav_agent_code.py` | Defaults to Hindsight Cloud |
+| API keys | Environment variables | Never commit real keys |
+| Bank ID | `BANK` in `uav_agent_code.py` and `load_dataset.py` | Must match in both files |
+| Mission | `MISSION` in `uav_agent_code.py` | Defines the agent's role and advisory-only behavior |
+| Seed dataset | `REPORTS` in `load_dataset.py` | 29 reports across 8 aircraft |
 
 ## Limitations and next steps
 
-- Ingestion is synchronous. `retain()` runs LLM fact extraction, so it is slow. A production write path should be a background job.
-- The "advisory only, cite prior events" rules live in the mission text. Non-negotiable rules belong in Hindsight directives.
-- Answers are generated by a model and vary run to run. Always verify against the recalled source reports.
-- Guidance is advisory. Airworthiness decisions belong to certified technicians.
+- `reflect()` is a synchronous LLM call; a production path should push
+  ingestion (`retain()`) to a background job.
+- The "advisory only, technician decides" rule lives in the mission string;
+  it's not (yet) a hard, non-negotiable guardrail enforced in code.
+- Answers are generated and should be reviewed against the recalled
+  evidence, not acted on directly — the memory panel exists specifically
+  to make that review fast.
+- Tested at prototype scale (29 reports, 8 aircraft); recall behavior at
+  real-fleet scale hasn't been measured.
 
 ## Learn more
 
