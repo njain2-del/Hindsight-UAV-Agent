@@ -149,6 +149,8 @@ learning loop, end to end.
 - Tested at prototype scale (29 reports, 8 aircraft); recall behavior at
   real-fleet scale hasn't been measured.
 
+## Prototype Execution Video: "https://www.youtube.com/watch?v=qVlc_u8FFZo"
+
 ## Learn more
 
 - [Hindsight on GitHub](https://github.com/vectorize-io/hindsight)
